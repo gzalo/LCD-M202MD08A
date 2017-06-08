@@ -211,16 +211,16 @@ uint8_t vfdSendData(uint8_t addr, uint8_t *msg, uint8_t len){
 	sendBff[len+2] = chksum[1];   //Checksum 2
 	sendBff[len+3] = CMD_FLAGCHAR&0xFF; //End of frame 
 	
-	//printf("Sending: ");
+	printf("Sending: ");
 		
 	//Send
 	for(i=0;i<=len+3;i++){
 		if(i == 0 || i == len+3){
-			//printf("%x! ", sendBff[i]);
+			printf("%x! ", sendBff[i]);
 			vfdSendByte(sendBff[i],1);
 			_delay_us(400);
 		}else{
-			//printf("%x ", sendBff[i]);
+			printf("%x ", sendBff[i]);
 			vfdSendByte(sendBff[i],0);
 		}
 		_delay_us(200); //1 extra stop byte
@@ -357,7 +357,6 @@ int main(void){
 		if(!rol){
 			printf("InitPoll\n");
 			vfdPoll(0);
-			vfdSNRM(0);
 			_delay_ms(10);
 		}
 		if(rol && !sync){
@@ -404,18 +403,18 @@ int main(void){
 				uint8_t chksum[2];
 				crc16_x25(cmdBuff, cmdIdx-2, chksum); //Calc checksum (excluding checksum bytes, of course)
 				
-				/*printf("DataRX: ");
+				printf("DataRX: ");
 				uint8_t i;
 				for(i=0;i<cmdIdx;i++)
 					printf("%x ", cmdBuff[i]);
-				printf("\n");*/
+				printf("\n");
 				
 				if(cmdBuff[cmdIdx-2] != chksum[0] || cmdBuff[cmdIdx-1] != chksum[1]){
 					printf("Wrong CRC: %x %x vs Recv %x %x\n", chksum[0], chksum[1], cmdBuff[cmdIdx-2], cmdBuff[cmdIdx-1]);
 				}else{
 					if(cmdBuff[1] == CMD_ROL){
-						rol = 1;
 						printf("ROL OK\n");
+						vfdSNRM(0);
 					}
 					if(cmdBuff[1] == CMD_NSA){
 						rol = 1;
@@ -423,7 +422,7 @@ int main(void){
 						recvFrames[0] = 0;
 					}
 					if((cmdBuff[1]&CMD_RR_MASK) == CMD_RR){
-						//printf("RR R=%d ", (cmdBuff[1]>>5)&7);
+						printf("RR R=%d ", (cmdBuff[1]>>5)&7);
 						if(sentFrames[0] != ((cmdBuff[1]>>5)&7)){
 							printf("Mismatch S/R\n");
 							sentFrames[0] = (cmdBuff[1]>>5)&7;
@@ -432,7 +431,7 @@ int main(void){
 							ack = 1;
 						}
 					}else if((cmdBuff[1]&CMD_I_NEG_MASK) == 0){
-						//printf("Info R=%d S=%d ", (cmdBuff[1]>>5)&7, (cmdBuff[1]>>1)&7);
+						printf("Info R=%d S=%d ", (cmdBuff[1]>>5)&7, (cmdBuff[1]>>1)&7);
 						
 						if(sentFrames[0] != ((cmdBuff[1]>>5)&7)){
 							printf("Mismatch S/R\n");
@@ -457,7 +456,7 @@ int main(void){
 		_delay_us(10);
 		vfdSendByte(0xAA,0);*/
 
-		_delay_ms(1);		
+		_delay_ms(10);		
 		//_delay_ms(100);			
 	}
 	return 0;
