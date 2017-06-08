@@ -5,4 +5,5 @@ all:
 	avr-objcopy -O ihex -R .eeprom main.elf main.hex
 
 run:
-	E:\prgm\avrdude-usbasp-pdi-bin\avrdude.exe -p atmega328p -P com3 -c arduino -b 57600 -U flash:w:main.hex
+	E:\prgm\avrdude-usbasp-pdi-bin\avrdude.exe -p atmega328p -P com11 -c arduino -b 57600 -U flash:w:main.hex
+	
