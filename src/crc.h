@@ -13,7 +13,7 @@ uint16_t crc_x25_update (uint16_t crc, uint8_t data){
 	return crc;
 }
 
-unsigned char crc_reverse(unsigned char b) {
+unsigned char crc_reverse(uint8_t b) {
    b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
    b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
    b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
@@ -21,9 +21,9 @@ unsigned char crc_reverse(unsigned char b) {
 }
 	
 void crc16_x25(uint8_t *data, uint8_t len, uint8_t *crc_out){
-	uint16_t crc = 0xFFFF, i;
+	uint16_t crc = 0xFFFF;
 	
-	for(i=0;i<len;i++)
+	for(uint16_t i=0;i<len;i++)
 		crc = crc_x25_update(crc, crc_reverse(data[i]));
 	
 	crc ^= 0xFFFF;
