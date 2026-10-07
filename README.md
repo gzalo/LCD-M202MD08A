@@ -4,6 +4,29 @@ Bitbanged serial output, reception handled with an interrupt
 Used in IBM 41K6814 20x2 dual VFD Point of Sale displays.
 Supports both displays and some basic commands
 
+## Build
+
+The project targets the 5 V, 16 MHz Arduino Pro Mini with an ATmega328P. It uses
+AVR C directly, without the Arduino framework. With PlatformIO installed:
+
+```sh
+pio run
+pio run --target upload
+pio device monitor --baud 115200
+```
+
+Set `upload_port` in `platformio.ini` or pass `--upload-port` when uploading if
+PlatformIO cannot identify the serial port. The original `make` build is also
+available for an installed AVR GCC toolchain.
+
+The code is organized as follows:
+
+- `src/main.c` reads terminal input and updates the two display lines.
+- `src/uart.c` provides the 115200 baud terminal connection and debug output.
+- `src/vfd.c` handles the VFD wire protocol, receive interrupt, and retries.
+- `src/crc.c` calculates frame checksums.
+- `include/` holds the module interfaces.
+
 ![Photo of LCD](photo.jpg?raw=true)
 
 ## Connection and usage info

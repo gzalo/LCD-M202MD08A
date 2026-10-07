@@ -1,5 +1,6 @@
+#include "crc.h"
 
-uint16_t crc_x25_update (uint16_t crc, uint8_t data){
+static uint16_t crc_x25_update (uint16_t crc, uint8_t data){
 	uint8_t i;
 
 	crc = crc ^ ((uint16_t)data << 8);
@@ -13,7 +14,7 @@ uint16_t crc_x25_update (uint16_t crc, uint8_t data){
 	return crc;
 }
 
-unsigned char crc_reverse(unsigned char b) {
+static unsigned char crc_reverse(unsigned char b) {
    b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
    b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
    b = (b & 0xAA) >> 1 | (b & 0x55) << 1;

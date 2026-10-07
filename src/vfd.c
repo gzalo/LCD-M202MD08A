@@ -1,36 +1,23 @@
-// Futaba M202MD08A LCD simplified driver code for Arduino Pro Mini (atmega328p)
-// Used in IBM 41K6814 20x2 dual VFD Point of Sale displays.
-// Supports both displays and some basic commands
-//
-// Released under Public Domain (code provided "as is", without warranty of any kind)
-// 2017 - Gzalo (Gonzalo Ávila Alterach)
-//
-// Thanks to
-// http://www.elektroda.pl/rtvforum/topic558072-90.html
-// http://we.easyelectronics.ru/lcd_gfx/vyvodim-informaciyu-na-vfd-ibm-41k6814.html
-
-#define F_CPU 16000000UL
-#define __DELAY_ROUND_CLOSEST__ 
+#define __DELAY_ROUND_CLOSEST__
+#include "vfd.h"
+#include "crc.h"
 #include <avr/io.h>
+#include <avr/interrupt.h>
 #include <util/delay.h>
 #include <stdio.h>
-#include <avr/interrupt.h>
 #include <string.h>
-#include <stdlib.h>
 
 #define LED_BIT PB5
 #define VFD_TX PD2
 #define VFD_RX PD3
 
-const uint8_t vfdAddr[2] = {0x24, 0x25};
-uint8_t sentFrames[2] = {0,0}, recvFrames[2] = {0,0}; 
+static const uint8_t vfdAddr[2] = {0x24, 0x25};
+static uint8_t sentFrames[2] = {0,0}, recvFrames[2] = {0,0}; 
 
 #define RECV_BUFF_LEN (32)
 #define SEND_BUFF_LEN (32)
 
-uint8_t recvBff[RECV_BUFF_LEN];
-uint8_t recvLen = 0;
-uint8_t sendBff[SEND_BUFF_LEN];
+static uint8_t sendBff[SEND_BUFF_LEN];
 
 #define CMD_FLAGCHAR (0x7E|0x100)
 #define CMD_EOPCHAR (0x5A|0x100)
@@ -57,11 +44,9 @@ uint8_t sendBff[SEND_BUFF_LEN];
 #define RX_RING_MASK (RECV_BUFF_LEN - 1)
 #define ACK_TIMEOUT_LOOPS (10)
 #define ACK_MAX_RETRIES (3)
-#define USART_NO_DATA (-1)
 
-#include "crc.h"
 
-void gpioInit(){
+static void gpioInit(){
 	DDRD |=  _BV(VFD_TX);
 	DDRD &= ~_BV(VFD_RX);
 	DDRB |= _BV(LED_BIT);
@@ -74,12 +59,12 @@ void gpioInit(){
 	
 }
 
-volatile uint8_t rxBff[RECV_BUFF_LEN] = {0};
-volatile uint8_t rxAddr[RECV_BUFF_LEN] = {0};
-volatile uint8_t rxPos = 0, rxRead = 0;
-volatile uint8_t rxOverflow = 0;
+static volatile uint8_t rxBff[RECV_BUFF_LEN] = {0};
+static volatile uint8_t rxAddr[RECV_BUFF_LEN] = {0};
+static volatile uint8_t rxPos = 0, rxRead = 0;
+static volatile uint8_t rxOverflow = 0;
 
-inline void pulse(){
+static inline void pulse(){
 	//PORTD &= ~_BV(VFD_TX);
 	//PORTD |= _BV(VFD_TX);
 }
@@ -124,44 +109,13 @@ ISR (INT1_vect){
 	EIFR = (1<<INTF1); //Clear any other falling edge interrupt
 }
 
-void timerInit(){
+static void timerInit(){
 	//Normal mode
 	TCCR1A = 0;
 	//Prescaler = 8
 	TCCR1B |= (1 << CS11);
 }
-#define USART_BAUDRATE 115200
-#define UBRR_VALUE (((F_CPU / (USART_BAUDRATE * 8UL))) - 1)	
-
-void USART0Init(void){
-	// Set baud rate
-	UBRR0H = (uint8_t)(UBRR_VALUE>>8);
-	UBRR0L = (uint8_t)UBRR_VALUE;
-	// Set frame format to 8 data bits, no parity, 1 stop bit
-	UCSR0C |= (1<<UCSZ01)|(1<<UCSZ00);
-	//enable transmission and reception
-	UCSR0B |= (1<<RXEN0)|(1<<TXEN0);
-	
-	UCSR0A |= (1<<U2X0);
-}
-int USART0SendByte(char u8Data, FILE *stream){
-	if(u8Data == '\n'){
-		USART0SendByte('\r', stream);
-	}
-	//wait while previous byte is completed
-	while(!(UCSR0A&(1<<UDRE0))){};
-	// Transmit data
-	UDR0 = u8Data;
-	return 0;
-}
-int16_t USART0GetByte(void){
-	if (!(UCSR0A & _BV(RXC0))) 
-		return USART_NO_DATA;
-	return UDR0;
-}
-FILE usart0_str = FDEV_SETUP_STREAM(USART0SendByte, NULL, _FDEV_SETUP_WRITE);
-
-void vfdSendByte(uint8_t byte, uint8_t addr){
+static void vfdSendByte(uint8_t byte, uint8_t addr){
 	//187500 bps
 		
 	PORTD &= ~_BV(VFD_TX);
@@ -202,7 +156,7 @@ void vfdPoll(uint8_t addr){
 
 //Sends data with address, checksum, framing
 //Len should be just the size of message (without adding 4)
-uint8_t vfdSendData(uint8_t addr, uint8_t *msg, uint8_t len){
+static uint8_t vfdSendData(uint8_t addr, uint8_t *msg, uint8_t len){
 	if(addr >= 2)
 		return ERR_ADDR;
 	if(len > SEND_BUFF_LEN - 4)
@@ -246,7 +200,7 @@ void vfdSNRM(uint8_t addr){
 }
 
 //Caller should have an extra byte to the beginning, to add info. command
-uint8_t vfdSendInfo(uint8_t addr, uint8_t *bff, uint8_t len){
+static uint8_t vfdSendInfo(uint8_t addr, uint8_t *bff, uint8_t len){
 	if(addr >= 2)
 		return ERR_ADDR;
 	
@@ -264,7 +218,7 @@ uint8_t vfdSendInfo(uint8_t addr, uint8_t *bff, uint8_t len){
 
 	return 0;
 }
-uint8_t vfdSendRR(uint8_t addr){
+static uint8_t vfdSendRR(uint8_t addr){
 	if(addr >= 2)
 		return ERR_ADDR;
 	
@@ -334,19 +288,18 @@ uint8_t vfdPrintLine(uint8_t addr, char * txt, char line){
 	return vfdSendInfo(addr, tmp, 24);
 }
 
-char lineas[2][21] = {"12345678901231231222", "ABCASDASDASDASDASDAS"};
-uint8_t linea = 0;
+static uint8_t linea = 0;
 
-uint8_t cmdBuff[32];
-uint8_t cmdIdx = 0;
-uint8_t cmdInFrame = 0;
+static uint8_t cmdBuff[32];
+static uint8_t cmdIdx = 0;
+static uint8_t cmdInFrame = 0;
 
-uint8_t rol = 0, sync = 0, ack = 1;
-uint8_t ackWait = 0, ackRetries = 0;
-uint8_t pendingFrame = 0, pendingLine = 0;
-char pendingText[21];
+static uint8_t rol = 0, sync = 0, ack = 1;
+static uint8_t ackWait = 0, ackRetries = 0;
+static uint8_t pendingFrame = 0, pendingLine = 0;
+static char pendingText[21];
 
-uint8_t rxGetByte(uint8_t *byte, uint8_t *addr){
+static uint8_t rxGetByte(uint8_t *byte, uint8_t *addr){
 	if(rxRead == rxPos)
 		return 0;
 
@@ -356,7 +309,7 @@ uint8_t rxGetByte(uint8_t *byte, uint8_t *addr){
 	return 1;
 }
 
-void protocolReset(void){
+static void protocolReset(void){
 	rol = 0;
 	sync = 0;
 	ack = 1;
@@ -369,7 +322,7 @@ void protocolReset(void){
 	recvFrames[0] = 0;
 }
 
-void handleFrame(void){
+static void handleFrame(void){
 	if(cmdIdx < 4){
 		printf("Short frame\n");
 		return;
@@ -436,7 +389,7 @@ void handleFrame(void){
 	}
 }
 
-void processRxByte(uint8_t byte, uint8_t addrBit){
+static void processRxByte(uint8_t byte, uint8_t addrBit){
 	if(addrBit && byte == (CMD_EOPCHAR&0xFF)){
 		cmdInFrame = 0;
 		cmdIdx = 0;
@@ -470,7 +423,7 @@ void processRxByte(uint8_t byte, uint8_t addrBit){
 	cmdBuff[cmdIdx++] = byte;
 }
 
-void processRxBuffer(void){
+void vfdProcessRx(void){
 	if(rxOverflow){
 		rxOverflow = 0;
 		cmdInFrame = 0;
@@ -483,82 +436,56 @@ void processRxBuffer(void){
 		processRxByte(byte, addrBit);
 }
 
-int main(void){
-	_delay_ms(100);
-	
+
+void vfdInit(void){
 	gpioInit();
 	timerInit();
-	USART0Init();
-	stdout=&usart0_str;
-	
-	sei();
-	
-	uint8_t curX = 0, curY = 0;
-	while(1){
-		int16_t v;
-		while((v = USART0GetByte()) != USART_NO_DATA){
-			lineas[curY][curX] = (char)v;
-			curX++;
-			if(curX == 20) curX = 0, curY++;
-			if(curY == 2) curY = 0;
-		}
+}
 
-		processRxBuffer();
-		
-		if(!rol){
-			printf("InitPoll\n");
+void vfdService(const char lines[2][21]){
+	if(!rol){
+		printf("InitPoll\n");
+		vfdPoll(0);
+		_delay_ms(10);
+	}else if(!sync){
+		vfdInfoReq(0);
+		_delay_ms(10);
+	}else if(ack){
+		pendingFrame = sentFrames[0];
+		pendingLine = linea;
+		memcpy(pendingText, lines[linea], 20);
+		pendingText[20] = 0;
+
+		if(vfdPrintLine(0, pendingText, pendingLine+1) == 0){
+			ack = 0;
+			ackWait = 0;
+			ackRetries = 0;
+			linea++;
+			if(linea == 2)
+				linea = 0;
+			_delay_ms(20);
 			vfdPoll(0);
-			_delay_ms(10);
-		}else if(!sync){
-			vfdInfoReq(0);
-			_delay_ms(10);
-		}else if(ack){
-			pendingFrame = sentFrames[0];
-			pendingLine = linea;
-			memcpy(pendingText, lineas[linea], 20);
-			pendingText[20] = 0;
-
-			if(vfdPrintLine(0, pendingText, pendingLine+1) == 0){
-				ack = 0;
-				ackWait = 0;
-				ackRetries = 0;
-				linea++;
-				if(linea == 2)
-					linea = 0;
-				_delay_ms(20);
-				vfdPoll(0);
+		}else{
+			protocolReset();
+		}
+	}else{
+		if(++ackWait >= ACK_TIMEOUT_LOOPS){
+			ackWait = 0;
+			if(ackRetries < ACK_MAX_RETRIES){
+				ackRetries++;
+				printf("Ack timeout, retry\n");
+				sentFrames[0] = pendingFrame;
+				if(vfdPrintLine(0, pendingText, pendingLine+1) == 0)
+					vfdPoll(0);
+				else
+					protocolReset();
 			}else{
+				printf("Ack timeout, resync\n");
 				protocolReset();
 			}
 		}else{
-			if(++ackWait >= ACK_TIMEOUT_LOOPS){
-				ackWait = 0;
-				if(ackRetries < ACK_MAX_RETRIES){
-					ackRetries++;
-					printf("Ack timeout, retry\n");
-					sentFrames[0] = pendingFrame;
-					if(vfdPrintLine(0, pendingText, pendingLine+1) == 0)
-						vfdPoll(0);
-					else
-						protocolReset();
-				}else{
-					printf("Ack timeout, resync\n");
-					protocolReset();
-				}
-			}else{
-				vfdPoll(0);
-			}
+			vfdPoll(0);
 		}
-
-		processRxBuffer();
-		
-		/* Test timing
-		vfdSendByte(0x55,1);
-		_delay_us(10);
-		vfdSendByte(0xAA,0);*/
-
-		_delay_ms(10);		
-		//_delay_ms(100);			
 	}
-	return 0;
+
 }
