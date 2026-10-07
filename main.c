@@ -54,6 +54,11 @@ uint8_t sendBff[SEND_BUFF_LEN];
 #define ERR_ADDR (3)
 #define ERR_RESPONSE (4)
 
+#define RX_RING_MASK (RECV_BUFF_LEN - 1)
+#define ACK_TIMEOUT_LOOPS (10)
+#define ACK_MAX_RETRIES (3)
+#define USART_NO_DATA (-1)
+
 #include "crc.h"
 
 void gpioInit(){
@@ -69,9 +74,10 @@ void gpioInit(){
 	
 }
 
-uint8_t rxBff[32] = {0};
-uint8_t rxAddr[32] = {0};
-uint8_t rxPos = 0, rxRead = 0;
+volatile uint8_t rxBff[RECV_BUFF_LEN] = {0};
+volatile uint8_t rxAddr[RECV_BUFF_LEN] = {0};
+volatile uint8_t rxPos = 0, rxRead = 0;
+volatile uint8_t rxOverflow = 0;
 
 inline void pulse(){
 	//PORTD &= ~_BV(VFD_TX);
@@ -97,20 +103,22 @@ ISR (INT1_vect){
 	}
 	_delay_us(US_PER_BIT_RX); //Go to addr bit
 	
-	if(PIND & _BV(VFD_RX)){
-		rxAddr[rxPos] = 1;
-	}else{
-		rxAddr[rxPos] = 0;
-	}
+	uint8_t addrBit = 0;
+	if(PIND & _BV(VFD_RX))
+		addrBit = 1;
 	pulse();
 	
 	_delay_us(US_PER_BIT_RX); //Go to stop bit
 	
-	rxBff[rxPos] = ret;
-	
 	if(PIND & _BV(VFD_RX)){
-		//Stop bit should be high
-		rxPos = (rxPos+1) & 31;
+		uint8_t nextPos = (rxPos+1) & RX_RING_MASK;
+		if(nextPos != rxRead){
+			rxBff[rxPos] = ret;
+			rxAddr[rxPos] = addrBit;
+			rxPos = nextPos;
+		}else{
+			rxOverflow = 1;
+		}
 	}	
 	
 	EIFR = (1<<INTF1); //Clear any other falling edge interrupt
@@ -146,10 +154,10 @@ int USART0SendByte(char u8Data, FILE *stream){
 	UDR0 = u8Data;
 	return 0;
 }
-uint8_t USART0GetByte(void){
+int16_t USART0GetByte(void){
 	if (!(UCSR0A & _BV(RXC0))) 
-		return 0;
-	return (uint8_t) UDR0;
+		return USART_NO_DATA;
+	return UDR0;
 }
 FILE usart0_str = FDEV_SETUP_STREAM(USART0SendByte, NULL, _FDEV_SETUP_WRITE);
 
@@ -197,6 +205,8 @@ void vfdPoll(uint8_t addr){
 uint8_t vfdSendData(uint8_t addr, uint8_t *msg, uint8_t len){
 	if(addr >= 2)
 		return ERR_ADDR;
+	if(len > SEND_BUFF_LEN - 4)
+		return ERR_MAX_LEN;
 	
 	sendBff[0] = vfdAddr[addr];        //Dst address
 	
@@ -242,11 +252,11 @@ uint8_t vfdSendInfo(uint8_t addr, uint8_t *bff, uint8_t len){
 	
 	bff[0] = (recvFrames[addr]<<5) | (sentFrames[addr]<<1);
 	//printf("SentInfo R=%d S=%d ", recvFrames[addr], sentFrames[addr]);
-	sentFrames[addr] = (sentFrames[addr]+1)&7;	
 	
 	uint8_t ret = vfdSendData(addr, bff, len);
 	if(ret != 0)
 		return ret;
+	sentFrames[addr] = (sentFrames[addr]+1)&7;
 
 	_delay_ms(1);
 	
@@ -258,7 +268,7 @@ uint8_t vfdSendRR(uint8_t addr){
 	if(addr >= 2)
 		return ERR_ADDR;
 	
-	uint8_t bff[1] = {(sentFrames[addr]<<5) | 1};
+	uint8_t bff[1] = {(recvFrames[addr]<<5) | CMD_RR};
 	//printf("SentRR R=%d ", sentFrames[addr]);
 	
 	uint8_t ret = vfdSendData(addr, bff, 1);
@@ -292,9 +302,7 @@ uint8_t vfdInfoReq(uint8_t addr){
 	tmp[2] = 0x00;
 	tmp[3] = 0x01;
 	
-	vfdSendInfo(addr, tmp, 4);
-
-	return 0;	
+	return vfdSendInfo(addr, tmp, 4);
 }
 
 uint8_t vfdPrintLine(uint8_t addr, char * txt, char line){
@@ -326,11 +334,154 @@ uint8_t vfdPrintLine(uint8_t addr, char * txt, char line){
 	return vfdSendInfo(addr, tmp, 24);
 }
 
-char *lineas[2] = {"12345678901231231222", "ABCASDASDASDASDASDAS"};
+char lineas[2][21] = {"12345678901231231222", "ABCASDASDASDASDASDAS"};
 uint8_t linea = 0;
 
 uint8_t cmdBuff[32];
 uint8_t cmdIdx = 0;
+uint8_t cmdInFrame = 0;
+
+uint8_t rol = 0, sync = 0, ack = 1;
+uint8_t ackWait = 0, ackRetries = 0;
+uint8_t pendingFrame = 0, pendingLine = 0;
+char pendingText[21];
+
+uint8_t rxGetByte(uint8_t *byte, uint8_t *addr){
+	if(rxRead == rxPos)
+		return 0;
+
+	*byte = rxBff[rxRead];
+	*addr = rxAddr[rxRead];
+	rxRead = (rxRead + 1) & RX_RING_MASK;
+	return 1;
+}
+
+void protocolReset(void){
+	rol = 0;
+	sync = 0;
+	ack = 1;
+	ackWait = 0;
+	ackRetries = 0;
+	linea = 0;
+	cmdInFrame = 0;
+	cmdIdx = 0;
+	sentFrames[0] = 0;
+	recvFrames[0] = 0;
+}
+
+void handleFrame(void){
+	if(cmdIdx < 4){
+		printf("Short frame\n");
+		return;
+	}
+
+	uint8_t chksum[2];
+	crc16_x25(cmdBuff, cmdIdx-2, chksum); //Calc checksum (excluding checksum bytes, of course)
+
+	printf("DataRX: ");
+	uint8_t i;
+	for(i=0;i<cmdIdx;i++)
+		printf("%x ", cmdBuff[i]);
+	printf("\n");
+
+	if(cmdBuff[cmdIdx-2] != chksum[0] || cmdBuff[cmdIdx-1] != chksum[1]){
+		printf("Wrong CRC: %x %x vs Recv %x %x\n", chksum[0], chksum[1], cmdBuff[cmdIdx-2], cmdBuff[cmdIdx-1]);
+		return;
+	}
+
+	uint8_t control = cmdBuff[1];
+	uint8_t remoteAck = (control>>5)&7;
+
+	if(control == CMD_ROL){
+		printf("ROL OK\n");
+		protocolReset();
+		vfdSNRM(0);
+		return;
+	}
+	if(control == CMD_NSA){
+		protocolReset();
+		rol = 1;
+		return;
+	}
+
+	uint8_t isRR = (control&CMD_RR_MASK) == CMD_RR;
+	uint8_t isInfo = (control&CMD_I_NEG_MASK) == 0;
+	if((isRR || isInfo) && !ack && remoteAck == sentFrames[0]){
+		ack = 1;
+		ackWait = 0;
+		ackRetries = 0;
+	}
+
+	if(isRR){
+		printf("RR R=%d ", remoteAck);
+		if(remoteAck != sentFrames[0])
+			printf("Mismatch S/R\n");
+	}else if(isInfo){
+		uint8_t remoteSend = (control>>1)&7;
+		printf("Info R=%d S=%d ", remoteAck, remoteSend);
+
+		if(remoteAck != sentFrames[0])
+			printf("Mismatch S/R\n");
+
+		if(remoteSend == recvFrames[0]){
+			recvFrames[0] = (recvFrames[0]+1)&7;
+		}else{
+			printf("Unexpected I-frame sequence\n");
+		}
+
+		vfdSendRR(0);
+
+		if(cmdIdx > 2 && cmdBuff[2] == 0x10)
+			sync = 1;
+	}
+}
+
+void processRxByte(uint8_t byte, uint8_t addrBit){
+	if(addrBit && byte == (CMD_EOPCHAR&0xFF)){
+		cmdInFrame = 0;
+		cmdIdx = 0;
+		return;
+	}
+
+	if(addrBit && byte == vfdAddr[0]){
+		cmdBuff[0] = byte;
+		cmdIdx = 1;
+		cmdInFrame = 1;
+		return;
+	}
+
+	if(!cmdInFrame)
+		return;
+
+	if(addrBit && byte == (CMD_FLAGCHAR&0xFF)){
+		handleFrame();
+		cmdInFrame = 0;
+		cmdIdx = 0;
+		return;
+	}
+
+	if(cmdIdx >= sizeof(cmdBuff)){
+		printf("RX frame too long\n");
+		cmdInFrame = 0;
+		cmdIdx = 0;
+		return;
+	}
+
+	cmdBuff[cmdIdx++] = byte;
+}
+
+void processRxBuffer(void){
+	if(rxOverflow){
+		rxOverflow = 0;
+		cmdInFrame = 0;
+		cmdIdx = 0;
+		printf("RX overflow\n");
+	}
+
+	uint8_t byte, addrBit;
+	while(rxGetByte(&byte, &addrBit))
+		processRxByte(byte, addrBit);
+}
 
 int main(void){
 	_delay_ms(100);
@@ -342,114 +493,64 @@ int main(void){
 	
 	sei();
 	
-	uint8_t rol=0, sync=0, ack=1;
-	uint8_t lastSent=-1;
 	uint8_t curX = 0, curY = 0;
 	while(1){
-		uint8_t v = USART0GetByte();
-		if(v){
-			lineas[curY][curX] = v;
+		int16_t v;
+		while((v = USART0GetByte()) != USART_NO_DATA){
+			lineas[curY][curX] = (char)v;
 			curX++;
 			if(curX == 20) curX = 0, curY++;
 			if(curY == 2) curY = 0;
 		}
+
+		processRxBuffer();
 		
 		if(!rol){
 			printf("InitPoll\n");
 			vfdPoll(0);
 			_delay_ms(10);
-		}
-		if(rol && !sync){
+		}else if(!sync){
 			vfdInfoReq(0);
 			_delay_ms(10);
-		}
-		if(sync && ack){
-			uint8_t k;
-			/*for(k=0;k<20;k++){
-				lineas[linea][k]=rand()%256;
-			}*/
-			vfdPrintLine(0, lineas[linea], linea+1);
-			lastSent = sentFrames[0];
-			ack = 0;
-			linea++;
-			if(linea == 2)
-				linea = 0;
-			_delay_ms(20);
-			vfdPoll(0);
-		}
-		
-		while(rxRead != rxPos){
-			//printf("%x(%d) ", rxBff[rxRead], rxAddr[rxRead]);
-			
-			if(rxBff[rxRead] == (CMD_EOPCHAR&0xFF) && rxAddr[rxRead] == 1){
-				//EOP printf("EOP");
-			}else if(rxBff[rxRead] == 0x24 && rxAddr[rxRead] == 1){
-				//Start of response
-				
-				cmdBuff[0] = 0x24;
-				cmdIdx = 1;
-				uint8_t foundFlag = 0;
-				while(!foundFlag){
-					rxRead = (rxRead + 1)&31; //Advance 1 character
-					while(rxRead == rxPos); //If no more bytes received, wait
-					
-					if(rxBff[rxRead] == (CMD_FLAGCHAR&0xFF) && rxAddr[rxRead] == 1){
-						foundFlag = 1;
-					}else{
-						cmdBuff[cmdIdx++] = rxBff[rxRead];
-					}
-				}
-				
-				uint8_t chksum[2];
-				crc16_x25(cmdBuff, cmdIdx-2, chksum); //Calc checksum (excluding checksum bytes, of course)
-				
-				printf("DataRX: ");
-				uint8_t i;
-				for(i=0;i<cmdIdx;i++)
-					printf("%x ", cmdBuff[i]);
-				printf("\n");
-				
-				if(cmdBuff[cmdIdx-2] != chksum[0] || cmdBuff[cmdIdx-1] != chksum[1]){
-					printf("Wrong CRC: %x %x vs Recv %x %x\n", chksum[0], chksum[1], cmdBuff[cmdIdx-2], cmdBuff[cmdIdx-1]);
-				}else{
-					if(cmdBuff[1] == CMD_ROL){
-						printf("ROL OK\n");
-						vfdSNRM(0);
-					}
-					if(cmdBuff[1] == CMD_NSA){
-						rol = 1;
-						sentFrames[0] = 0;
-						recvFrames[0] = 0;
-					}
-					if((cmdBuff[1]&CMD_RR_MASK) == CMD_RR){
-						printf("RR R=%d ", (cmdBuff[1]>>5)&7);
-						if(sentFrames[0] != ((cmdBuff[1]>>5)&7)){
-							printf("Mismatch S/R\n");
-							sentFrames[0] = (cmdBuff[1]>>5)&7;
-						}
-						if(lastSent == sentFrames[0]){
-							ack = 1;
-						}
-					}else if((cmdBuff[1]&CMD_I_NEG_MASK) == 0){
-						printf("Info R=%d S=%d ", (cmdBuff[1]>>5)&7, (cmdBuff[1]>>1)&7);
-						
-						if(sentFrames[0] != ((cmdBuff[1]>>5)&7)){
-							printf("Mismatch S/R\n");
-						}
+		}else if(ack){
+			pendingFrame = sentFrames[0];
+			pendingLine = linea;
+			memcpy(pendingText, lineas[linea], 20);
+			pendingText[20] = 0;
 
-						recvFrames[0] =  (cmdBuff[1]>>5)&7;
-						
-						vfdSendRR(0);
-						
-						if(cmdBuff[2] == 0x10)
-							sync = 1;	
-					}	
-				}
-				
+			if(vfdPrintLine(0, pendingText, pendingLine+1) == 0){
+				ack = 0;
+				ackWait = 0;
+				ackRetries = 0;
+				linea++;
+				if(linea == 2)
+					linea = 0;
+				_delay_ms(20);
+				vfdPoll(0);
+			}else{
+				protocolReset();
 			}
-			
-			rxRead = (rxRead + 1)&31;
+		}else{
+			if(++ackWait >= ACK_TIMEOUT_LOOPS){
+				ackWait = 0;
+				if(ackRetries < ACK_MAX_RETRIES){
+					ackRetries++;
+					printf("Ack timeout, retry\n");
+					sentFrames[0] = pendingFrame;
+					if(vfdPrintLine(0, pendingText, pendingLine+1) == 0)
+						vfdPoll(0);
+					else
+						protocolReset();
+				}else{
+					printf("Ack timeout, resync\n");
+					protocolReset();
+				}
+			}else{
+				vfdPoll(0);
+			}
 		}
+
+		processRxBuffer();
 		
 		/* Test timing
 		vfdSendByte(0x55,1);
